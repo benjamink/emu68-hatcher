@@ -30,6 +30,7 @@ class ScriptInjection:
     content: str | None = None  # or inline content
     start_pattern: str | None = None  # regex for injection point
     end_pattern: str | None = None  # for Remove action
+    fallback_pattern: str | None = None  # InjectBefore/After anchor if start_pattern misses
     name: str = ""  # comment marker name
 
 
@@ -99,9 +100,13 @@ def inject_script(
         if injection.action == InjectionAction.ADD:
             edit = _action_add(original_lines, injection_block)
         elif injection.action == InjectionAction.INJECT_BEFORE:
-            edit = _action_inject_before(original_lines, injection_block, injection.start_pattern)
+            edit = _action_inject_before(
+                original_lines, injection_block, injection.start_pattern, injection.fallback_pattern
+            )
         elif injection.action == InjectionAction.INJECT_AFTER:
-            edit = _action_inject_after(original_lines, injection_block, injection.start_pattern)
+            edit = _action_inject_after(
+                original_lines, injection_block, injection.start_pattern, injection.fallback_pattern
+            )
         elif injection.action == InjectionAction.REMOVE:
             edit = _action_remove(
                 original_lines, injection.start_pattern, injection.end_pattern, injection.name
@@ -179,25 +184,37 @@ def _action_add(original: list[str], block: list[str]) -> _EditResult:
     return _EditResult(original + block, True)
 
 
+def _find_anchor(original: list[str], pattern: str, fallback: str | None) -> int | None:
+    """index of first line matching pattern, else first line matching fallback"""
+    for candidate in (pattern, fallback):
+        if not candidate:
+            continue
+        regex = re.compile(candidate, re.IGNORECASE)
+        index = next((i for i, line in enumerate(original) if regex.search(line)), None)
+        if index is not None:
+            return index
+    return None
+
+
 def _action_inject_before(
-    original: list[str], block: list[str], pattern: str | None
+    original: list[str], block: list[str], pattern: str | None, fallback: str | None = None
 ) -> _EditResult:
-    """insert block before first line matching pattern"""
+    """insert block before first line matching pattern (or fallback)"""
     if not pattern:
         return _EditResult(original, False, "InjectBefore requires start_pattern")
-    regex = re.compile(pattern, re.IGNORECASE)
-    index = next((i for i, line in enumerate(original) if regex.search(line)), None)
+    index = _find_anchor(original, pattern, fallback)
     if index is None:
         return _EditResult(original, False, f"Required pattern not found: {pattern}")
     return _EditResult(original[:index] + block + original[index:], True)
 
 
-def _action_inject_after(original: list[str], block: list[str], pattern: str | None) -> _EditResult:
-    """insert block after first line matching pattern"""
+def _action_inject_after(
+    original: list[str], block: list[str], pattern: str | None, fallback: str | None = None
+) -> _EditResult:
+    """insert block after first line matching pattern (or fallback)"""
     if not pattern:
         return _EditResult(original, False, "InjectAfter requires start_pattern")
-    regex = re.compile(pattern, re.IGNORECASE)
-    index = next((i for i, line in enumerate(original) if regex.search(line)), None)
+    index = _find_anchor(original, pattern, fallback)
     if index is None:
         return _EditResult(original, False, f"Required pattern not found: {pattern}")
     insert_at = index + 1
@@ -264,6 +281,10 @@ STARTUP_SEQUENCE_INJECTIONS = [
         action=InjectionAction.INJECT_BEFORE,
         content_file="S/Startup-Sequence_Iconlib",
         start_pattern=r"^(?:C:)?SetPatch(?:\s|$)",
+        # Amiga Forever 3.x nests SetPatch in a Version/If WARN block; the Iconlib
+        # block is self-contained, so go before the first command instead of
+        # splitting the Version check from its If
+        fallback_pattern=r"^[^;\s]",
         name="Iconlib",
     ),
     # UAEGFX persistent monitor swap (runs 5th, furthest from anchor)
@@ -318,6 +339,8 @@ STARTUP_SEQUENCE_INJECTIONS = [
         action=InjectionAction.INJECT_BEFORE,
         content="Mount >NIL: DEVS:DOSDrivers/~(#?.info)",
         start_pattern=r"LoadMonDrvs",
+        # Amiga Forever 3.x loads monitors inline instead of via LoadMonDrvs
+        fallback_pattern=r"^\s*IF\s+EXISTS\s+DEVS:Monitors\s*$",
         name="Mount DOSDrivers (with >NIL:)",
     ),
 ]
