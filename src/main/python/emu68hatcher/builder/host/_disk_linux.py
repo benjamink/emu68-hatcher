@@ -7,10 +7,35 @@ import subprocess
 
 from emu68hatcher.builder.host.disk_info import DiskInfo, DiskOperationResult
 
+# built-in SD readers report the card as RM=0 but HOTPLUG=1 / TRAN=mmc
+_REMOVABLE_TRANSPORTS = {"usb", "mmc"}
+
+
+def _is_removable(device: dict) -> bool:
+    return bool(
+        device.get("rm")
+        or device.get("hotplug")
+        or (device.get("tran") or "").lower() in _REMOVABLE_TRANSPORTS
+    )
+
+
+def _mountpoints(device: dict) -> list[str]:
+    """mountpoints of a device and everything below it (partitions, crypt, lvm)"""
+    mounts = [m for m in (device.get("mountpoints") or [device.get("mountpoint")]) if m]
+    for child in device.get("children") or []:
+        mounts.extend(_mountpoints(child))
+    return mounts
+
 
 def list_disks() -> list[DiskInfo]:
     result = subprocess.run(
-        ["lsblk", "-J", "-b", "-o", "NAME,SIZE,TYPE,MOUNTPOINT,MOUNTPOINTS,RM,RO,MODEL,VENDOR"],
+        [
+            "lsblk",
+            "-J",
+            "-b",
+            "-o",
+            "NAME,SIZE,TYPE,MOUNTPOINT,MOUNTPOINTS,RM,HOTPLUG,TRAN,RO,MODEL,VENDOR",
+        ],
         capture_output=True,
         text=True,
         timeout=10,
@@ -19,20 +44,18 @@ def list_disks() -> list[DiskInfo]:
         return []
     disks = []
     for device in json.loads(result.stdout).get("blockdevices", []):
-        if device.get("type") != "disk" or not device.get("rm") or device.get("ro"):
+        if device.get("type") != "disk" or not _is_removable(device) or device.get("ro"):
             continue
         size = int(device.get("size") or 0)
         if not size:
             continue
-        mounted = [
-            mount
-            for child in device.get("children", []) or []
-            for mount in child.get("mountpoints") or [child.get("mountpoint")]
-            if mount
-        ]
+        mounted = _mountpoints(device)
         name = (
             " ".join(
-                filter(None, [device.get("vendor", "").strip(), device.get("model", "").strip()])
+                filter(
+                    None,
+                    [(device.get("vendor") or "").strip(), (device.get("model") or "").strip()],
+                )
             )
             or device["name"]
         )
@@ -42,7 +65,9 @@ def list_disks() -> list[DiskInfo]:
                 name=name,
                 size_bytes=size,
                 is_removable=True,
-                is_system_disk=any(mount in ("/", "/boot", "/boot/efi") for mount in mounted),
+                is_system_disk=any(
+                    mount in ("/", "/boot", "/boot/efi", "[SWAP]") for mount in mounted
+                ),
                 mounted_partitions=mounted,
             )
         )
